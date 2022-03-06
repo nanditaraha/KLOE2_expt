@@ -1,0 +1,1096 @@
+// HOW TO USE THIS PROGRAM:
+//
+// 1) make your work directory: mkdir QCALT_calibration. The QCALT.C file should be in this directory.
+//
+// 2) move there: cd QCALT_calibration
+//
+// 3) make the directory "QCALT_HV_calibration_input" with input .root and .dat files: mkdir QCALT_HV_calibration_input
+//
+// 4) make the directory "QCALT_HV_calibration_output" which will contain output QCALT_HV_calibration_output: mkdir QCALT_HV_calibration_output
+//
+// 5) create file "rootlogon.C" in "QCALT_calibration" directory:
+//              {
+//              gROOT->LoadMacro("QCALT.C+");
+//              }
+//
+// 6) launch root
+//
+// 7) to perform gain equalization:
+// 7.1 launch filldata(), and then write "true" if you want to save all plots with two peak fit
+// 7.2 launch obtainmap(double gain), and then write "true" if you want to save all gain_Voltage plots
+//
+// 8) to write the calibrated HV values to config-file:
+// launch QCALT_config_write(double threshold); use threshold=80 as a default value.
+//
+// 9) to make the QCALT time calibration:
+// launch  QCALT_time_calibration(double mean_lower_boundary, double mean_upper_boundary, double width_lower_boundary, double width_upper_boundary, double n_events_cut, double signal_amplitude_quality_cut, double signal_width_quality_cut); by default use QCALT_time_calibration(-20,20,3,30,100,2.5,2)
+////////////////////////////////////////////////////////////////////////////////////////
+string nameinput = "QCALT_HV_calibration_input/input3.dat"; // input file
+// calib_82963.root 30
+// ...
+
+string nameoutput = "QCALT_HV_calibration_output/mapVQCalt_v0_low.dat"; // output file which will contain voltage info to fix gain factor
+#include <TROOT.h>
+#include <TKey.h>
+#include <iomanip>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <stdio.h>
+#include <stdlib.h>
+#include <cstring>
+#include <string>
+#include "Riostream.h"
+#include <TF1.h>
+#include <TStyle.h>
+#include <TCanvas.h>
+#include "TProfile.h"
+#include "TFile.h"
+#include "TMatrixTSym.h"
+#include "TGraph.h"
+#include "TGraphErrors.h"
+#include "TMultiGraph.h"
+#include "TGaxis.h"
+#include "TMath.h"
+#include "TVector.h"
+#include "TStyle.h"
+#include "TBenchmark.h"
+#include "TTree.h"
+#include <TStyle.h>
+#include <TH1.h>
+#include "TVirtualFitter.h"
+#include "TFitResultPtr.h"
+#include "TMatrixDSym.h"
+#include "TMinuit.h"
+#include "TObject.h"
+#include "TLegend.h"
+using namespace std;
+
+double  peinfo[1921][4];
+double Constatnt = 0.;
+double ugol = 0.;
+double dugol = 0.;
+
+int npeak = 0;
+double mean1 = 0.;
+double width1 = 0;double width1l = 0;double width1r = 0;
+double mean2 = 0.;
+double width2 = 0.;double width2l = 0;double width2r = 0;
+
+double bin2mV = 2.;
+
+void find_peak(TH1F *hist, double binmv){
+  // this function change predefined global variables mean.., width.. about peaks of input hist
+  int bin = hist->GetNbinsX();
+  //-----Smooth
+  hist->Smooth(20);
+  mean1 = 1.;
+  mean2 = 1.;
+  bin = hist->GetNbinsX();
+  TH1F* nhistb = new TH1F("nhistb","nhistb",bin,0.,float(bin)*bin2mV);
+  double factor = 1.;
+  int npeaks = 0.;
+  //find first peak
+  for(int i = 1; i < bin-2;i++){
+    if(hist->GetArray()[i] > hist->GetArray()[i-1]
+       && hist->GetArray()[i] > hist->GetArray()[i+1]
+       && hist->GetArray()[i] > 60.
+       && npeaks == 0){npeaks++;mean1 = i*binmv*factor;}
+  }
+  //find second peak
+  for(int i = 1; i < bin-2;i++){
+
+    if(hist->GetArray()[i] > hist->GetArray()[i-1]
+       && hist->GetArray()[i] > hist->GetArray()[i+1]
+       && hist->GetArray()[i] > 60.
+       && npeaks == 1
+       && fabs(i*binmv*factor - mean1) > 7.){npeaks++;mean2 = i*binmv*factor;}
+  }
+  double mean3 = 1.;
+  //try to find next peak
+  for(int i = 1; i < bin-2;i++){
+    if(hist->GetArray()[i] > hist->GetArray()[i-1]
+       && hist->GetArray()[i] > hist->GetArray()[i+1]
+       && hist->GetArray()[i] > 60.
+       && npeaks >0.
+       && fabs(i*binmv*factor - mean1) > 7.){npeaks++;mean3 = i*binmv*factor;}
+  }
+  // if third peak mean greater second one choose third instead of second
+  if(mean3 > mean2){mean2 = mean3;}
+  double three = mean1;
+  if(mean1 > mean2){
+    mean1 = mean2;
+    mean2 = three;
+  }
+  //cout << "mean 1 = " << mean1 << "    mean2 = " << mean2 << "============================================================" << endl;
+  // in the next lines i try to estimate the width of the found peaks
+  nhistb->Reset();
+  for(int j = mean1/binmv/factor-3; j < mean1/binmv/factor+3; j++){
+    double paerem0 = hist->GetArray()[j];
+    nhistb->SetBinContent(j,paerem0);
+  }
+  width1 = nhistb->GetRMS();
+  nhistb->Reset();
+  for(int j = mean2/binmv/factor-4; j < mean2/binmv/factor+4; j++){
+    double paerem0 = hist->GetArray()[j];
+    nhistb->SetBinContent(j,paerem0);
+  }
+  width2 = nhistb->GetRMS();
+  for(int i = 0; i < 4; i++){
+    nhistb->Reset();
+    for(int j = mean1/binmv/factor-width1*1.1; j < mean1/binmv/factor+width1*1.1; j++){
+      double paerem0 = hist->GetArray()[j];
+      nhistb->SetBinContent(j,paerem0);
+    }
+    width1 = nhistb->GetRMS();
+    nhistb->Reset();
+    for(int j = mean2/binmv/factor-width2*1.1; j < mean2/binmv/factor+width2*1.1; j++){
+      double paerem0 = hist->GetArray()[j];
+      nhistb->SetBinContent(j,paerem0);
+    }
+    width2 = nhistb->GetRMS();
+  }
+  // obtain the minimum after first peak
+  // it used in a fit range of first peak
+  width1r = width1;
+  double paerem1 = hist->GetArray()[(int)(mean1/binmv/factor)];
+  for(int j = (int)mean1/binmv/factor; j < (int)mean1/binmv/factor +3+(int)2.*width1/binmv/factor; j++){
+    if(j > mean2/binmv/factor){continue;}
+    double paerem0 = hist->GetArray()[j];
+    if(paerem0 < paerem1 ){width1r = (double)j*binmv*factor-mean1;}
+    paerem1 = hist->GetArray()[j];
+  }
+  // obtain the minimum before second peak
+  // it used in a fit range of second peak
+  width2l = width2;
+  paerem1 = hist->GetArray()[(int)(mean2/binmv/factor)];
+  for(int j = (int)mean2/binmv/factor; j > (int)mean2/binmv/factor - 3 - (int)2.*width2/binmv/factor; j = j -1){
+    if(j < mean1/binmv/factor){continue;}
+    double paerem0 = hist->GetArray()[j];
+    if(paerem0 < paerem1 ){width2l = -(double)j*binmv*factor+mean2;}
+    paerem1 = hist->GetArray()[j];
+  }
+  delete nhistb;
+}
+
+void analyze(string rootfile, string tempf, string calibfilename, bool WRITEMODE){
+  
+  // rootfile - input root file with calibration data
+  // tempf -    output root file with histogramms
+  // calibfilename - output txt file:
+  TCanvas *s0 = new TCanvas();
+  int nhist=0;
+  int start;
+  int bin;
+  int a,b,c;
+  int entries;
+  int dead_ch = 0;
+  int onepeak = 0;
+  bool dataquality = true;
+  double *channelnumber = new double[2000];
+  double *gain = new double[2000];
+  double *dgain = new double[2000];
+  //cout << rootfile << endl;
+  TFile* calib = TFile::Open(rootfile.c_str());
+  calib->cd("RAW2ELEQCALT");
+  TIter next(gDirectory->GetListOfKeys()); 
+  TKey *key;
+  ofstream scrivimi(calibfilename.c_str());
+  // scrivimi << "Channel ID, gain, dgain"<<'\n';
+  //Acces histo list
+  //loop over all objects in the direcory
+  while ((key = (TKey*)next())) {
+    start=0;
+    dataquality = true;
+    nhist++;
+    cout << " -------------------------------- channel number " << nhist << endl;
+    //if(nhist > 200 && nhist < 1800)continue;
+    channelnumber[nhist] = nhist;
+    TClass *cl = gROOT->GetClass(key->GetClassName());
+    //if the object is a histogram continue
+    if (!cl->InheritsFrom("TH1")) continue;
+    TH1 *h = (TH1*)key->ReadObj();
+    
+    entries = h->GetEntries();     //this gives the number of entries with overflow and underflow   
+    start = h->GetMaximumBin();
+    bin = h->GetNbinsX(); //- start;   //starting from the maximum of the distribution
+    //----------------------------------------------------------------------------------------------------------------------------------------  
+    //create histogram of the difference
+    TH1F* hdiff = new TH1F("hdiff","",bin,0.,float(bin)*bin2mV);
+    hdiff->SetYTitle("events");
+    hdiff->SetXTitle("SiPM output");
+    TH1F* hdiff0 = new TH1F("hdiff0","",bin,0.,float(bin)*bin2mV);
+    TH1F* hdiff1 = new TH1F("hdiffbis","",bin,0.,float(bin)*bin2mV);
+    for(int j=start;j<=bin;j++){
+      a = h->GetBinContent(j);
+      b = h->GetBinContent(j+1);
+      c = fabs(a-b)/bin2mV;
+      hdiff->Fill(float(j)*bin2mV,c);
+      hdiff0->Fill(float(j)*bin2mV,c);
+    }
+    hdiff->Smooth(20);
+    hdiff->Draw();
+
+    find_peak(hdiff0,bin2mV);
+
+    // define dataquality
+    // if (we see only one peak) gain < 0 and dataquality = false
+    // if (entries < 100. || hdiff->GetMean() < 1.) gain = 0 and dataquality = false
+    if(entries > 10. && mean1 < 4){gain[nhist] = -10.;dgain[nhist] = 0.;dataquality = false;onepeak++;}
+    if(entries > 10. && mean2 < 4){gain[nhist] = -10.;dgain[nhist] = 0.; dataquality = false; onepeak++;}
+    if(entries > 10. && hdiff->GetMean() < 12.){gain[nhist] = -5.;dgain[nhist] = 0.;dataquality = false; onepeak++;}
+    if(entries < 100. || hdiff->GetMean() < 1.){gain[nhist] = 0.;
+      dgain[nhist] = 0.;
+      dataquality = false;
+      if(nhist>80 || nhist<1841) {dead_ch++;}
+    }
+
+    //----------------------------------------------------------------------------------------------------------------------------------------  
+    if(dataquality == true){  
+      //----------------------------------------------------------FIT---------------------------------------------------------------------------------------
+      //TCanvas *s = new TCanvas();
+      TF1 *fit = new TF1("fit","[0]/(sqrt(2.*3.1415)*[2])*exp(-(x-[1])*(x-[1])/2./[2]/[2])+[3]",mean1-width1*7.,mean1+width1r);
+      TF1 *fit1 = new TF1("fit1","[0]/(sqrt(2.*3.1415)*[2])*exp(-(x-[1])*(x-[1])/2./[2]/[2])+[3]",mean2-width2*1.2,mean2+width2*1.2);
+      fit->SetParameters(800.,mean1,width1,1);
+      fit->SetParLimits(0,0,1e8);fit->SetParLimits(1,mean1-10.,mean1+10.);
+      fit->SetParLimits(2,1,30);
+      cout << " ================================= start fit 1 ==============================" << endl;
+      // fit first peak
+      hdiff->Fit("fit","qRL");
+      fit1->SetParameters(100.,mean2,width2,1);
+      fit1->SetParLimits(0,0,1e8);fit1->SetParLimits(1,mean2-10.,mean2+10.);
+      fit1->SetParLimits(2,2,30);
+      cout << " ================================= start fit 2 ==============================" << endl;
+      // fit second peak
+      hdiff->Fit("fit1","q+","same",mean2-width2l,mean2+width2*1.1);
+      gain[nhist] = fit1->GetParameter(1)-fit->GetParameter(1);
+      dgain[nhist] = sqrt(fit->GetParError(1)*fit->GetParError(1)+fit1->GetParError(1)*fit1->GetParError(1));
+      hdiff->SetTitle(Form("ch %i  Prob = %g Prob1 = %g  gain %g+/-%g",nhist,(fit->GetProb()*1000)/1000.,(fit1->GetProb()*1000)/1000.,gain[nhist],dgain[nhist]));
+      //hdiff->SetTitle(Form("ch %i  Prob = %g Prob1 = %g  gain %g+/-%g",nhist,mean1,mean2,gain[nhist],dgain[nhist]));
+      //if(nhist > 896){getchar();}
+      fit1->Delete();
+      fit->Delete();
+    }
+    //==========================================================================================================================
+    if(gain[nhist] > 3){s0->SetFillColor(0);}
+    else {s0->SetFillColor(8);}
+    if(WRITEMODE == true){
+      if(nhist == 1){s0->Print((tempf+".pdf[").c_str());}
+      else if(nhist > 0 && nhist < 1900 && entries > 100.) {s0->Print((tempf+".pdf").c_str());}
+      else if(nhist == 1900){s0->Print((tempf+".pdf]").c_str());}
+    }
+    calib->cd("RAW2ELEQCALT");
+    //-----------------------------------------------------------------------------------------------------------------------------------------  
+    //Write output file   
+    scrivimi << nhist <<" "<< gain[nhist] << " " << dgain[nhist]<< endl;  
+    //-----------------------------------------------------------------------------------------------------------------------------------------
+    hdiff1->Delete();
+    hdiff0->Delete();
+    hdiff->Delete();
+  }
+  scrivimi << "total number of channels: " <<  nhist <<"\n";
+  scrivimi <<"Number of dead channels: "<<" "<<dead_ch<<"\n";
+  scrivimi <<"Number of onepeak channels: "<<" "<<onepeak<<"\n";
+  scrivimi.close();
+  cout << "total number of channels: " <<  nhist <<"\n";
+  cout <<"Number of dead channels: "<<" "<<dead_ch<<"\n";
+  cout <<"Number of onepeak channels: "<<" "<<onepeak<<"\n";
+  
+  
+  TH1F *fr0  = s0->DrawFrame(-1,-10,2000.,100.);
+  fr0->SetXTitle("channel number");
+  fr0->SetYTitle("~gain");
+  TGraphErrors *Cross0   = new TGraphErrors(nhist,channelnumber,gain,0,dgain);
+  Cross0->SetMarkerColor(2);
+  Cross0->SetMarkerStyle(20);
+  Cross0->SetLineColor(2);
+  Cross0->SetLineWidth(2.);
+  Cross0->Draw("P");
+  
+  if(WRITEMODE == true) s0->SaveAs("QCALT_HV_calibration_output/allch.png");
+  
+  delete Cross0;
+  delete fr0;
+  delete s0;
+  delete channelnumber;
+  delete gain;
+  delete dgain;  
+}
+
+void filldata(){
+  // to run over all voltages values
+  ifstream stream(nameinput.c_str());
+  string name, temp;
+  bool batva = false;
+  cout << " Please input true if you want to use WRITE MODE ";
+  string chh;
+  cin >> chh;
+  if(chh == "true")batva = true;
+  stream >> name >> temp;
+  while(stream.eof()==0){
+   analyze(("QCALT_HV_calibration_input/"+name).c_str(),("QCALT_HV_calibration_output/diff"+name).c_str(),("QCALT_HV_calibration_output/"+name+".dat").c_str(),batva);
+   stream >> name >> temp;
+  }
+}
+
+void draw_gain_V(double channel){
+  
+  //The function plot gain:Voltage dependences
+  // and fit by function: Constatnt + ugol*V
+  
+  double Voltage[] = {30.,31,32,33,34.,35.,0.}; // you need to write which Voltages you are interested in
+  double gain[100];
+  double dgain[100];
+  double volt[100];
+  int i = 0; int j = 0;
+  int number = 0;
+  double batva = -99.;
+  bool nwes = false;
+  // the following cicle fill gain and Voltage massives
+  while(Voltage[i]!=0.){
+    //cout << " Voltage[i] = " << Voltage[i] <<endl;
+    string books[1000];
+    ifstream stream0(nameinput.c_str());
+    j = 0;
+    while(stream0.eof()==0){
+      stream0 >>  books[j] >> batva;
+      if(batva == Voltage[i]){j++;break;}
+      //if(batva == Voltage[i]){j++;} // Use this line instead of previous one when you
+      // want take into account all data runs inside input.dat
+    }
+    for(int l = 0; l < j; l++){
+      ifstream stream(("QCALT_HV_calibration_output/"+books[l]+".dat").c_str());
+      stream >> batva;
+      while(batva!=channel && stream.eof()!=1){stream >> batva;}
+      stream >> gain[number] >> dgain[number];
+      volt[number] = Voltage[i];
+      if(gain[number] > 0.){number++; nwes = true;}
+      stream.close();
+    }
+    i++;
+    stream0.close();
+  }
+  if(nwes == false) {
+    Constatnt = 0.;
+    ugol = 0.;
+    dugol = 0.;
+    printf("draw_gain_V: gain less or equal 0!\n");
+    return; //exit program
+    //break;
+  }
+  
+  TF1 *u = new TF1("u","[0]+[1]*x",20,340.5);
+  TGraphErrors *Cross0   = new TGraphErrors(number,volt,gain,0,dgain);
+  Cross0->SetMarkerColor(2);
+  Cross0->SetMarkerStyle(20);
+  Cross0->SetLineColor(2);
+  Cross0->SetLineWidth(0.3);
+  Cross0->Draw("P");
+  Cross0->Fit("u","qR","",30.5,34.5);
+  double prob = u->GetProb();
+  double range1,range2;
+  range1 = 30.5;
+  range2 = 34.5;
+  Cross0->Fit("u","qR","",30.,34.5);
+  double prob1 = u->GetProb();
+  if(prob1 > prob){range1 = 30.;prob = prob1;}
+  
+  Cross0->Fit("u","qR","",range1,35.5);
+  prob1 = u->GetProb();
+  if(prob1 > prob){range2 = 35.5;prob = prob1;}
+  
+  Cross0->Fit("u","qR","",range1,33.5);
+  prob1 = u->GetProb();
+  if(prob1 > prob){range2 = 33.5;prob = prob1;}
+  
+  Cross0->Fit("u","qR","",range1,range2);
+  
+  if(number < 3)Cross0->Fit("u","R");
+  if(gain[number-1] > 100.)Cross0->Fit("u","qR","",volt[0]-0.5,volt[number-2]+0.5);
+  
+  Cross0->SetTitle(Form("ch = %g, Prob = %g",channel,u->GetProb()));
+  Constatnt = u->GetParameter(0);
+  ugol = u->GetParameter(1);
+  dugol = u->GetParError(1);
+}
+
+void obtainmap(double gain){
+  ofstream stream(nameoutput.c_str());
+  // 0 - the channel is died or it is onepeak channel
+  cout << " Please input true if you want to use WRITE MODE ";
+  string chh;
+  cin >> chh;
+  
+  // the next cicle run over all channels, plot gain:Voltage dependences
+  // and fit by function:
+  for(int i = 0; i < 1920; i++){
+    TCanvas *s = new TCanvas();
+    TH1F *fr0 = s->DrawFrame(29.5,0,35.5,100.);
+    fr0->SetXTitle("V");
+    fr0->SetYTitle("~gain");
+    draw_gain_V(i);
+    //if(i > 500){getchar();}
+    stream << i << " ";
+    fr0->SetTitle(Form("ch %i    %g + %g*V",i,Constatnt,ugol));
+    if(ugol > 0.) stream << (gain - Constatnt)/ugol <<  " " << dugol/ugol*gain << endl;
+    else stream << 0. << " " << 0. << endl;
+
+    if(chh == "true"){
+      if(i==0){s->Print("QCALT_HV_calibration_output/gain_V.pdf[");}
+      else if(i==1919){s->Print("QCALT_HV_calibration_output/gain_V.pdf]");}
+      else {if(ugol > 1.){ s->Print("QCALT_HV_calibration_output/gain_V.pdf");}}
+    }
+    delete fr0;
+    delete s;
+  }
+}
+
+void compare_V(){
+  
+  double *V1 = new double[2000];
+  double *V2 = new double[2000];
+  double *ratio = new double[2000];
+  double *dratio = new double[2000];
+  double *channel = new double[2000];
+  int i = 0;
+  
+  ifstream stream1("QCALT_HV_calibration_output/mapVQCalt_v0_high.dat");
+  ifstream stream("QCALT_HV_calibration_output/mapVQCalt_v0_low.dat");
+  double A,B,C;
+  while(stream1.eof()==0){
+    stream1 >> A >> B >> C;
+    channel[i] = i;
+    V1[i] = B;
+    stream >> A >> B >> C;
+    V2[i] = B;
+    if(V1[i] > 0. && V2[i] > 0. && fabs(V1[i]/V2[i] - 1.) < 0.05){ratio[i] = V1[i]/V2[i];dratio[i] = C/B*ratio[i]; i++;}
+    cout << i << " " << ratio[i] << endl;
+  }
+
+  TCanvas *s0 = new TCanvas();
+  TH1F *fr0  = s0->DrawFrame(-1,-10,2000.,100.);
+  fr0->SetXTitle("channel number");
+  fr0->SetYTitle("Vh/Vl");
+  TGraphErrors *Cross0   = new TGraphErrors(i,channel,ratio,0,dratio);
+  Cross0->SetMarkerColor(1);
+  Cross0->SetMarkerStyle(20);
+  Cross0->SetLineColor(1);
+  Cross0->SetLineWidth(1.);
+  Cross0->Draw("P");
+}
+
+void drawexample(){
+  
+  cout << " Draw gain_V plots for 36 channels " << endl;
+  cout << " input start channel number " <<endl;
+  int number = 1300;//1578;
+  cin >> number;
+  TCanvas *s = new TCanvas();
+  s->Divide(6,6);
+  for(int i = 1; i < 37;i++){
+    TF1 *u = new TF1("u","[0]+[1]*x",31.5,360);
+    TH1F *fr0 = s->cd(i)->DrawFrame(29.5,0,35.5,100.);
+    fr0->SetXTitle("V");
+    fr0->SetYTitle("~gain");
+    draw_gain_V(number);
+    number++;
+  }
+}
+
+int QCALT_channel_mapper(int i, int j, char FEE , int dac, int chanDac){
+  
+  //For a given Chain,Board,FRONT_END, DAC & Channel we need to know corresponding
+  //Detector,Module,Plane & Tile and pack this information into a Channel number
+  //So for:
+  //int i; //chain in the Xml file (0-2)
+  //int j; //board in the xml file (0-15) for chain 0 and 1 and (0-11) for chain=2
+  //char FFE; //FEE int the xml file A=1, B=2, or in the other words for each board
+  //the first FEE is A (1) and the second is B (2)
+  //int dac; //DAC number (0-2)
+  //int chanDac; //Number of channel for a given DAC (0-7), for DAC=3 (0-3)
+  
+  int Chain2Mod [3][16] = {{1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8},
+			   {9,9,10,10,11,11,0,0,1,1,2,2,3,3,4,4},
+			   {5,5,6,6,7,7,8,8,9,9,10,10,-1,-1,-1,-1}
+  };//the last chain has only 12 boards
+  
+  int Chain2Det [3][16] = {{1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+			   {1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2},
+			   {2,2,2,2,2,2,2,2,2,2,2,2,-1,-1,-1,-1}
+  };
+  
+  int Chain2TB [3][16] = {{1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2},
+			  {1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2},
+			  {1,2,1,2,1,2,1,2,1,2,1,2,-1,-1,-1,-1}
+  };
+  
+  int Dac2PlaA14[3][8] = {{4,4,4,4,4,4,4,4},
+			  {4,4,4,4,4,3,4,3},
+			  {4,3,4,3,-1,-1,-1,-1}
+  };
+  
+  int Dac2ChanA14[3][8] = {{0,1,2,3,4,5,6,7},
+			   {8,9,10,11,12,12,13,13},
+			   {14,14,15,15,-1,-1,-1,-1}
+  };
+  
+  int Dac2PlaB14[3][8] = {{1,0,1,0,1,0,1,0},
+			  {0,0,0,0,0,0,0,0},
+			  {0,0,0,0,-1,-1,-1,-1}
+  };
+  int Dac2ChanB14[3][8] ={{3,0,2,1,1,2,6,3},
+			  {4,5,6,7,8,9,10,11},
+			  {12,13,14,15,-1,-1,-1,-1}
+  };
+  int Dac2PlaA23[3][8] ={{2,2,2,2,3,3,3,3},
+			 {3,3,3,3,3,2,3,2},
+			 {3,2,3,2,-1,-1,-1,-1}
+  };
+  int Dac2ChanA23[3][8] ={{12,13,14,15,0,1,2,3},
+			  {4,5,6,7,8,12,9,9},
+			  {10,10,11,11,-1,-1,-1,-1}
+  };
+  int Dac2PlaB23[3][8] ={{2,1,2,1,2,1,2,1},
+			 {1,1,1,1,1,1,1,1},
+			 {2,2,2,2,-1,-1,-1,-1}
+  };
+  int Dac2ChanB23[3][8] ={{7,4,6,5,5,1,4,7},
+			  {8,9,10,11,12,13,14,15},
+			  {0,1,2,3,-1,-1,-1,-1}
+  };
+  
+  int PlaNum;
+  int Tile;
+  
+  int DetNum = Chain2Det[i][j];
+  int ModNum = Chain2Mod[i][j];
+  int TB = Chain2TB[i][j];
+  if(TB==1){
+    //1_4 Transition board
+    if(FEE=='A'){
+      PlaNum = Dac2PlaA14[dac][chanDac];
+      Tile = Dac2ChanA14[dac][chanDac];
+    }
+    if(FEE=='B'){
+      PlaNum = Dac2PlaB14[dac][chanDac];
+      Tile = Dac2ChanB14[dac][chanDac];
+    }
+  }
+  if(TB==2){
+    //2_3 Transition board
+    if(FEE=='A'){
+      PlaNum = Dac2PlaA23[dac][chanDac];
+      Tile = Dac2ChanA23[dac][chanDac];
+    }
+    if(FEE=='B'){
+      PlaNum = Dac2PlaB23[dac][chanDac];
+      Tile = Dac2ChanB23[dac][chanDac];
+    }
+  }
+  //Now the packed channel number:
+  
+  int ModTmp = ModNum + 1;        // (0:11) -> (1:12)
+  int PlaTmp = PlaNum + 1;       // (0:4)  -> (1:5)
+  int TilTmp = Tile   + 1;       // (0:15) -> (1:16)
+  // constants
+  // int QCALTNdet =  2
+  int QCALTNmod = 12;
+  int QCALTNpla =  5;
+  int QCALTNtil = 16;
+  
+  int  QCALTPoi = (DetNum-1)*QCALTNtil*QCALTNpla*QCALTNmod+(ModTmp-1)*QCALTNtil*QCALTNpla+(PlaTmp-1)*QCALTNtil+TilTmp;  
+  if (PlaNum==-1||Tile==-1||DetNum==-1||ModNum==-1||TB==-1) {QCALTPoi=-1;}  
+  return QCALTPoi;
+}
+
+void QCALT_config_write(double threshold){
+  
+  int flag=0,chain=-1;
+  int loweff=0;
+  int hoteff=0;
+  std::string line,line_HV;
+  string PieceOfText0,PieceOfText1,PieceOfText2,PieceOfText3,PieceOfText_HV,value_board,value_DAC,value_channel;
+  char value_FrontEnd;
+  ifstream readFile("QCALT_HV_calibration_input/QCALTSettings.config"); // reading input config file
+  ofstream writeFile;
+  writeFile.open("QCALT_HV_calibration_output/QCALTSettings_out.config"); // writing output config file, filled with calibrated hv values
+  /////////////////////////////////////////////////////
+  
+  while(getline(readFile,line)){    
+    stringstream iss0(line);
+    getline(iss0,PieceOfText0,'<'); //extracts from string iss0 characters till the '<' is found
+    getline(iss0,PieceOfText0,'>');    
+    if (PieceOfText0.compare("chain")==0||PieceOfText0.compare("board")==0||PieceOfText0.compare("FrontEnd_A")==0||PieceOfText0.compare("FrontEnd_B")==0||PieceOfText0.compare("DAC")==0||PieceOfText0.compare("channel")==0||PieceOfText0.compare("hv")==0||PieceOfText0.compare("thr")==0){      
+      //
+      //.compare compares the value of string to the sequence of characters specified as argument
+      //if PieceOfText0 is chain or etc .compare returns 0!
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("chain")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	chain=chain+1;
+      }  
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("board")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	getline(readFile,line);
+	stringstream iss1(line);
+	getline(iss1,PieceOfText1,'<');
+	getline(iss1,PieceOfText1,'>');
+	if (PieceOfText1.compare("id")==0){
+	  getline(iss1,PieceOfText1,'<');
+	  value_board=PieceOfText1;
+	}  
+	writeFile << line<<'\n';     
+      }
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("FrontEnd_A")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	value_FrontEnd='A';
+      }    
+      if (PieceOfText0.compare("FrontEnd_B")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	value_FrontEnd='B';
+      }    
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("DAC")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	getline(readFile,line);
+	stringstream iss2(line);
+	getline(iss2,PieceOfText2,'<');
+	getline(iss2,PieceOfText2,'>');
+	if (PieceOfText2.compare("id")==0){
+	  getline(iss2,PieceOfText2,'<');
+	  value_DAC=PieceOfText2;
+	}   
+	writeFile << line<<'\n';
+      }
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("channel")==0){
+	writeFile<<line;
+	writeFile<<'\n';
+	getline(readFile,line);
+	stringstream iss3(line);
+	getline(iss3,PieceOfText3,'<');
+	getline(iss3,PieceOfText3,'>');
+	if (PieceOfText3.compare("id")==0){
+	  getline(iss3,PieceOfText3,'<');
+	  value_channel=PieceOfText3;
+	}
+	writeFile << line<<'\n';
+      }
+      ///////////////////////////////////////////////////
+      if (PieceOfText0.compare("thr")==0){
+	writeFile<<"                <thr>";
+	writeFile<<threshold;
+	writeFile<<"</thr>"; 
+	writeFile<<'\n';
+      }
+      //////////////////////////////////////////////////
+      if (PieceOfText0.compare("hv")==0){
+	const char* zonk = value_board.c_str();
+	int board = atoi(zonk);
+	zonk = value_DAC.c_str();
+	int DAC = atoi(zonk);
+	zonk = value_channel.c_str();
+	int channel = atoi(zonk);
+	if (QCALT_channel_mapper(chain,board,value_FrontEnd,DAC,channel)!=-1){
+	  /////////////////// Reading calibrated HV values
+	  ifstream readFile_HV("QCALT_HV_calibration_output/mapVQCalt_v0_low.dat");
+	  int flag=0;
+	  while(getline(readFile_HV,line_HV)&&flag==0){
+	    stringstream iss_HV(line_HV);	
+	    getline(iss_HV,PieceOfText_HV,' ');
+	    zonk = PieceOfText_HV.c_str();
+	    float HVs = atof(zonk); 
+	    if (HVs==QCALT_channel_mapper(chain,board,value_FrontEnd,DAC,channel)){
+	      getline(iss_HV,PieceOfText_HV,' ');
+	      flag=1;
+	    }  
+	  }      
+	  writeFile<<"                <hv>";
+	  zonk = PieceOfText_HV.c_str();
+	  float HVs = atof(zonk);
+	  if (HVs<=35.00 && HVs >=30.00){
+	    writeFile<<int(HVs*1000);
+	    //cout << HVs<<endl;
+	  }else{
+	    if(HVs>35.){
+	      writeFile<<35000;
+	      //cout<<HVs<<endl;
+	      loweff++;
+	    }
+	    if(HVs<30){
+	      writeFile<<30000;
+	      //cout<< HVs<<endl;
+	      hoteff++;
+	    }
+	  }
+	  writeFile<<"</hv>";
+	  // uncomment, if you want to check the correctness of ChannelNumber-HV_value correspondence
+	  // writeFile<<" channel number = ";
+	  // writeFile<<QCALT_channel_mapper(chain,std::stoi(value_board),value_FrontEnd,std::stoi(value_DAC),std::stoi(value_channel));
+	  /////////////////////////////////////
+	  writeFile<<'\n';
+	}else{
+	  writeFile<<"                <hv>";
+	  writeFile<<"0";
+	  writeFile<<"</hv>";
+	  writeFile<<'\n';
+	}
+      }
+    }else{
+      writeFile<<line;
+      writeFile<<'\n';
+    }    
+  }
+  ////////////////////////////////////////////////////////////////////////////////////////////////  
+  cout << "Number of channels with voltage over 35V="<<loweff<<endl;
+  cout << "Nub=mber of channels with too low voltage=" << hoteff<<endl;
+  readFile.close();
+  writeFile.close();
+}
+
+void QCALT_time_calibration(double mean_lower_boundary, double mean_upper_boundary, double width_lower_boundary, double width_upper_boundary, double n_events_cut, double signal_amplitude_quality_cut, double signal_width_quality_cut){
+   
+  gStyle->SetOptStat(0000);
+  
+  TFile *file_input = TFile::Open("QCALT_time_calibration_input/calib_80780_allhistos.root"); // input file with histograms
+  
+  ofstream writeFile;
+  writeFile.open("QCALT_time_calibration_output/QCALT_time_calibration_parameters.dat");
+  
+  /////////////////////////////////////////////////////////////////////////////////
+  // we are fitting the list of histograms with numbers from i_min to i_max:
+  const int i_min=30081;
+  const int i_max=31840; 
+  const int n_hists=i_max-i_min+1; // total number of histograms
+  Int_t n_bad=0,bad_channel_number[i_max-i_min+1]; // the list of numbers of bad channels
+  Int_t n_good=0,n_bad_=0;
+  /////////////////////////////////////////////////////////////////////////////////
+  // upper and lower limits of fitting:
+  const double fit_lower_limit=-200.0;
+  const double fit_upper_limit= 200.0;
+  /////////////////////////////////////////////////////////////////////////////////
+  // the criteria for the bad channels selection
+  bool dead_channel_status; // ==0 if histogram has 0 entries (dead channel)
+  bool efficiency_status; // ==0 if histogram has too few entries (<n_events_cut)
+  bool fit_status; // ==0 if the fit has not been converged
+  bool signal_amplitude_quality_status; // ==0 if the signal can be considered as a fluctuation of the background: integral_{mean-2sigma}^{mean+2gigma}(f_signal)/sqrt(integral_{mean-2sigma}^{mean+2gigma}(f_bkg))<signal_amplitude_quality_cut
+  bool signal_width_quality_status; // == 0 if the uncertainty of signal width, divided by signal width is > signal_width_quality
+  /////////////////////////////////////////////////////////////////////////////////
+  // Lists of signal parameters:
+  Double_t mean[n_hists],mean_error[n_hists],width[n_hists],width_error[n_hists];  
+  ///////////////////////////////////////////////////////////////////////////
+  // names of canvases, hitograms and graphs
+  char h_name[100],h_number_of_entries_name[100],c_hists_name[100],c_parameters_name[100],g_mean_good_name[100],g_mean_bad_name[100],g_width_good_name[100],g_width_bad_name[100],g_n_events_good_name[100],g_n_events_bad_name[100],g_signal_amplitude_quality_good_name[100],g_signal_amplitude_quality_bad_name[100];    
+  ///////////////////////////////////////////////////////////////////////////
+  // the list of 1920 histograms are divided into 19 groups with 100 + 1 group with 20 histograms 
+  for (int j=0;j<=19;j++){   
+    
+    // Initializing all necessary canvases ang graphs:
+    sprintf(c_hists_name,"c_hists_%i",j);       
+    TCanvas *c_hists = new TCanvas(c_hists_name,c_hists_name,0,0,1200,800);
+    c_hists->Divide(10,10,0,0);
+    //
+    sprintf(g_mean_good_name,"g_mean_good_%i",j);
+    TGraphErrors *g_mean_good = new TGraphErrors();
+    g_mean_good->SetTitle(g_mean_good_name);
+    sprintf(g_mean_bad_name,"g_mean_bad_%i",j);
+    TGraphErrors *g_mean_bad = new TGraphErrors();
+    g_mean_bad->SetTitle(g_mean_bad_name);
+    //
+    sprintf(g_width_good_name,"g_width_good_%i",j);
+    TGraphErrors *g_width_good = new TGraphErrors();
+    g_width_good->SetTitle(g_width_good_name);    
+    sprintf(g_width_bad_name,"g_width_bad_%i",j);
+    TGraphErrors *g_width_bad = new TGraphErrors();
+    g_width_bad->SetTitle(g_width_bad_name);
+    //
+    sprintf(g_signal_amplitude_quality_good_name,"g_signal_amplitude_quality_good_%i",j);
+    TGraph *g_signal_amplitude_quality_good = new TGraph();
+    g_signal_amplitude_quality_good->SetTitle(g_signal_amplitude_quality_good_name);
+    sprintf(g_signal_amplitude_quality_bad_name,"g_signal_amplitude_quality_bad_%i",j);
+    TGraph *g_signal_amplitude_quality_bad = new TGraph();
+    g_signal_amplitude_quality_bad->SetTitle(g_signal_amplitude_quality_bad_name);
+    //
+    sprintf(g_n_events_good_name,"g_n_events_good_%i",j);
+    TGraph *g_n_events_good = new TGraph();
+    g_n_events_good->SetTitle(g_n_events_good_name);
+    sprintf(g_n_events_bad_name,"g_n_events_bad_%i",j);
+    TGraph *g_n_events_bad = new TGraph();
+    g_n_events_bad->SetTitle(g_n_events_bad_name);
+    //
+    ///////////////////////////////////////////////////////////////////
+    // reading the histograms from file and their fitting:
+    for (int i=i_min;i<=i_min+100-1;i++){     
+      
+      if (i+100*j<=i_max){
+	////////////////////////////////////////////////////////////////////////////////////////////
+	// Functions for fitting: gaus for signal and linear function for background
+	TF1 *f = new TF1("f","gaus(0)+pol1(3)+abs(pol1(3))",fit_lower_limit,fit_upper_limit);
+	TF1 *f_signal = new TF1("f_signal","gaus(0)",fit_lower_limit,fit_upper_limit);
+	TF1 *f_bkg = new TF1("f_bkg","pol1(3)+abs(pol1(3))",fit_lower_limit,fit_upper_limit);
+	////////////////////////////////////////////////////////////////////////////////////////////
+	// reading the histogram from file:
+	sprintf(h_name,"h%i",i+100*j);    
+	TH1D *h_ = (TH1D*)file_input->Get(h_name);
+	// redefining the histogram (I failed to switch off the drawing of error bars in the h_):
+	TH1D *h = new TH1D("h","h",h_->GetXaxis()->GetNbins(),h_->GetXaxis()->GetBinLowEdge(1),h_->GetXaxis()->GetBinLowEdge(h_->GetXaxis()->GetNbins())+h_->GetXaxis()->GetBinWidth(1));
+	for (int k=1;k<=h_->GetXaxis()->GetNbins();k++){	    
+	  h->SetBinContent(k,h_->GetBinContent(k));
+	}
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Evaluating the selection criteria according to their logical priority:		
+	// Evaluating of the dead_channel_status and efficiency_status criteria:
+	dead_channel_status=h->Integral(h->GetXaxis()->FindBin(fit_lower_limit),h->GetXaxis()->FindBin(fit_upper_limit))!=0;
+	efficiency_status=h->Integral(h->GetXaxis()->FindBin(fit_lower_limit),h->GetXaxis()->FindBin(fit_upper_limit))>=n_events_cut;
+	
+	if (dead_channel_status==1&&efficiency_status==1){  
+	  f->SetParameters(10.0,0.0,5.0,1.0,0.0); // initializing the parameters of the fitting function
+	  f->SetParLimits(0,0.0,100000.0); // signal amplitude range
+	  f->SetParLimits(1,mean_lower_boundary,mean_upper_boundary); // signal mean value range
+	  f->SetParLimits(2,width_lower_boundary,width_upper_boundary); // signal width range
+	  f->SetParLimits(3,0.001,1000000.0); // background constant term should be positive
+	  // fitting the histogram:
+	  h->Fit(f,"rme0q+");	
+	  h->Fit(f,"rme0lq+");	
+	  h->Fit(f,"rme0llq+");	
+	  f_signal->SetParameters(f->GetParameter(0),f->GetParameter(1),f->GetParameter(2));
+	  f_bkg->SetParameters(f->GetParameter(3),f->GetParameter(4));	  
+	  
+	  // Evaluating of the fit_status criterion:
+	  fit_status=gMinuit->fCstatu=="SUCCESSFUL";
+	  if (fit_status==1){
+	    // Evaluating of the signal_amplitude_quality_status criterion:
+	    signal_amplitude_quality_status=f->GetParameter(0)/f->GetParError(0)>signal_amplitude_quality_cut;
+	    signal_width_quality_status=f->GetParameter(2)/f->GetParError(2)>signal_width_quality_cut;
+	  }else{
+	    signal_amplitude_quality_status=0;
+	    signal_width_quality_status=0;
+	  }
+	}else{
+	  fit_status=0;
+	  signal_amplitude_quality_status=0;
+	  signal_width_quality_status=0;
+	}
+	
+	// Uncomment, if you want to switch off the selection criterion
+	//signal_width_quality_status=1;
+	//signal_amplitude_quality_status=1;
+	//fit_status=1;
+	//efficiency_status=1;
+	//dead_channel_status=1;
+	
+	if (dead_channel_status==1&&efficiency_status==1&&fit_status==1&&signal_amplitude_quality_status==1&&signal_width_quality_status==1){
+	  
+	  writeFile<<i+100*j;
+	  writeFile<<" ";
+	  writeFile<<f->GetParameter(1);
+	  writeFile<<" ";
+	  writeFile<<f->GetParError(1);	  
+	  writeFile<<" ";	  
+	  writeFile<<f->GetParameter(2);	  
+	  writeFile<<" ";	  
+	  writeFile<<f->GetParError(2)<<" "<<"0";	
+	  writeFile<<'\n';
+	  
+	  // drawing the histogram with fitting function
+	  c_hists->cd(i-i_min+1); 
+	  h->SetFillColor(kGreen);
+	  h->Draw("B");
+	  h->GetXaxis()->SetRangeUser(fit_lower_limit,fit_upper_limit);
+	  h->GetYaxis()->SetRangeUser(0,1.6*h->GetMaximum());
+	  h->Draw("B");
+	  gPad->Update();
+	  f->SetLineColor(kBlue);
+	  f->Draw("SAME");
+	  
+	  n_good=n_good+1;
+	  TLegend *leg = new TLegend(0.0,0.5,0.4,1.0);
+	  leg->SetHeader(h_name);
+	  leg->AddEntry(h,"GOOD","f");
+	  leg->Draw("SAME");
+	  // filling the graphs:
+	  g_mean_good->SetPoint(n_good,i+100*j+1,f->GetParameter(1));
+	  g_mean_good->SetPointError(n_good,0,f->GetParError(1));
+	  g_width_good->SetPoint(n_good,i+100*j+1,f->GetParameter(2));
+	  g_width_good->SetPointError(n_good,0,f->GetParError(2));	 
+	  g_signal_amplitude_quality_good->SetPoint(n_good,i+100*j+1,f->GetParameter(0)/f->GetParError(0));
+	  g_n_events_good->SetPoint(n_good,i+100*j+1,h->Integral(h->GetXaxis()->FindBin(fit_lower_limit),h->GetXaxis()->FindBin(fit_upper_limit)));	  
+	}else{
+	  
+	  writeFile<<i+100*j;
+	  writeFile<<" ";
+	  writeFile<<9999;
+	  writeFile<<" ";
+	  writeFile<<0;	  
+	  writeFile<<" ";	  
+	  writeFile<<9999;	  
+	  writeFile<<" ";	  
+	  writeFile<<0;
+	  writeFile<<" ";	  
+	  
+	  // drawing the histogram
+	  c_hists->cd(i-i_min+1);  
+	  h->GetYaxis()->SetRangeUser(0,1.6*h->GetMaximum());
+       	  h->SetFillColor(kRed);
+	  h->Draw("B");
+	  
+	  // Writing this channel to the list of bad channels:
+	  bad_channel_number[n_bad]=i+100*j;
+	  n_bad=n_bad+1;	  
+	  // Printing the reason of the rejection of this channel (taking into account to the logical priority of selection criteria):
+	  TLegend *leg = new TLegend(0.0,0.6,1.0,1.0);
+	  leg->SetHeader(h_name);
+	  if (dead_channel_status==0){
+	    leg->AddEntry(h,"DEAD","f");
+	    writeFile<<1;                           //flag=1->dead channel	    
+	  }else{
+	    if (efficiency_status==0){
+	      leg->AddEntry(h,"LOW EFFICIENCY","f");
+	      writeFile<<2;                         //flag=2->low efficiency channel
+	    }else{
+	      if (fit_status==0) {
+		leg->AddEntry(h,"FIT FAILED","f");
+		writeFile<<3;                      //flag=3->fit did not converge
+	      }else{
+		n_bad_=n_bad_+1;
+		if (signal_amplitude_quality_status==0) {
+		  leg->AddEntry(h,"BAD AMPLITUDE","f");
+		  writeFile<<4;                    //flag=4->amplitude did not pass cuts
+		}else{
+		  if (signal_width_quality_status==0) {
+		    leg->AddEntry(h,"BAD WIDTH","f");
+		    writeFile<<5;                 //flag=5->with did not pass requirements
+		  }
+		}
+	      }
+	    }
+	  }
+	  leg->Draw("SAME");	  
+	  writeFile<<'\n';
+	  
+	  g_n_events_bad->SetPoint(n_bad,i+100*j+1,h->Integral(h->GetXaxis()->FindBin(fit_lower_limit),h->GetXaxis()->FindBin(fit_upper_limit)));	 
+	  
+	  if (fit_status==1){
+	    g_mean_bad->SetPoint(n_bad,i+100*j+1,f->GetParameter(1));
+	    g_mean_bad->SetPointError(n_bad,0,f->GetParError(1));
+	    g_width_bad->SetPoint(n_bad,i+100*j+1,f->GetParameter(2));
+	    g_width_bad->SetPointError(n_bad,0,f->GetParError(2));
+	    g_signal_amplitude_quality_bad->SetPoint(n_bad,i+100*j+1,f->GetParameter(0)/f->GetParError(0));	    
+	  }	  
+	}	       
+      }
+    }   
+    
+    // Drawing the plots with important parameters:    
+    sprintf(c_parameters_name,"c_parameters_%i",j); 
+    TCanvas *c_parameters = new TCanvas(c_parameters_name,c_parameters_name,0,0,1200,800);
+    c_parameters->Divide(2,2);
+    //
+    c_parameters->cd(1);
+    TMultiGraph *mg_n_events = new TMultiGraph();
+    g_n_events_good->SetLineColor(kGreen);
+    g_n_events_good->SetMarkerColor(kGreen);
+    g_n_events_good->SetMarkerStyle(20);
+    g_n_events_bad->SetLineColor(kRed);
+    g_n_events_bad->SetMarkerColor(kRed);
+    g_n_events_bad->SetMarkerStyle(20);
+    mg_n_events->Add(g_n_events_good);
+    mg_n_events->Add(g_n_events_bad);
+    mg_n_events->Draw("AP");    
+    mg_n_events->GetXaxis()->SetLimits(i_min+100*j-10,i_min+100*(j+1)+10);
+    mg_n_events->GetYaxis()->SetRangeUser(0,6000);
+    mg_n_events->Draw("AP");
+    TF1 *f_n_events = new TF1("f_n_events","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_n_events->SetParameter(0,n_events_cut);
+    f_n_events->Draw("SAME");
+    TLegend *leg_n_events = new TLegend(0.13,0.75,0.8,0.9);
+    leg_n_events->SetHeader("NUMBER OF EVENTS");
+    leg_n_events->Draw("SAME"); 
+    //
+    c_parameters->cd(2);
+    TMultiGraph *mg_mean = new TMultiGraph();
+    g_mean_good->SetLineColor(kGreen);
+    g_mean_good->SetMarkerColor(kGreen);
+    g_mean_good->SetMarkerStyle(20);
+    g_mean_bad->SetLineColor(kRed);
+    g_mean_bad->SetMarkerColor(kRed);
+    g_mean_bad->SetMarkerStyle(20);
+    mg_mean->Add(g_mean_good);
+    mg_mean->Add(g_mean_bad);    
+    mg_mean->Draw("AP");    
+    mg_mean->GetXaxis()->SetLimits(i_min+100*j-10,i_min+100*(j+1)+10);
+    mg_mean->GetYaxis()->SetRangeUser(mean_lower_boundary*1.1,mean_upper_boundary*1.6);  
+    mg_mean->Draw("AP");
+    gPad->Update(); 
+    TLegend *leg_mean = new TLegend(0.13,0.75,0.8,0.9);
+    leg_mean->SetHeader("SIGNAL MEAN");
+    leg_mean->Draw("SAME");
+    TF1 *f_mean_lower_cut = new TF1("f_mean_lower_cut","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_mean_lower_cut->SetParameter(0,mean_lower_boundary);
+    f_mean_lower_cut->Draw("SAME");
+    TF1 *f_mean_upper_cut = new TF1("f_mean_upper_cut","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_mean_upper_cut->SetParameter(0,mean_upper_boundary);
+    f_mean_upper_cut->Draw("SAME");
+    //
+    c_parameters->cd(3);
+    TMultiGraph *mg_signal_amplitude_quality = new TMultiGraph();
+    g_signal_amplitude_quality_good->SetLineColor(kGreen);
+    g_signal_amplitude_quality_good->SetMarkerColor(kGreen);
+    g_signal_amplitude_quality_good->SetMarkerStyle(20);
+    g_signal_amplitude_quality_bad->SetLineColor(kRed);
+    g_signal_amplitude_quality_bad->SetMarkerColor(kRed);
+    g_signal_amplitude_quality_bad->SetMarkerStyle(20);
+    mg_signal_amplitude_quality->Add(g_signal_amplitude_quality_good);
+    mg_signal_amplitude_quality->Add(g_signal_amplitude_quality_bad);
+    mg_signal_amplitude_quality->Draw("AP");    
+    mg_signal_amplitude_quality->GetXaxis()->SetLimits(i_min+100*j-10,i_min+100*(j+1)+10);
+    mg_signal_amplitude_quality->GetYaxis()->SetRangeUser(0,10);
+    mg_signal_amplitude_quality->Draw("AP");
+    gPad->Update();
+    TF1 *f_signal_amplitude_quality_cut = new TF1("f_signal_amplitude_quality_cut","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_signal_amplitude_quality_cut->SetParameter(0,signal_amplitude_quality_cut);
+    f_signal_amplitude_quality_cut->Draw("SAME");
+    TLegend *leg_signal_amplitude_quality = new TLegend(0.13,0.75,0.8,0.9);
+    leg_signal_amplitude_quality->SetHeader("SIGNAL AMPLITUDE VALUE/ERROR");
+    leg_signal_amplitude_quality->Draw("SAME"); 
+    //
+    c_parameters->cd(4);
+    TMultiGraph *mg_width = new TMultiGraph();
+    g_width_good->SetLineColor(kGreen);
+    g_width_good->SetMarkerColor(kGreen);
+    g_width_good->SetMarkerStyle(20);
+    g_width_bad->SetLineColor(kRed);
+    g_width_bad->SetMarkerColor(kRed);
+    g_width_bad->SetMarkerStyle(20);
+    mg_width->Add(g_width_good);
+    mg_width->Add(g_width_bad);
+    mg_width->Draw("AP");   
+    mg_width->GetXaxis()->SetLimits(i_min+100*j-10,i_min+100*(j+1)+10);
+    mg_width->GetYaxis()->SetRangeUser(0,width_upper_boundary*1.4);
+    mg_width->Draw("AP");
+    gPad->Update(); 
+    TLegend *leg_width = new TLegend(0.13,0.75,0.8,0.9);
+    leg_width->SetHeader("SIGNAL WIDTH");
+    leg_width->Draw("SAME");  
+    TF1 *f_width_lower_cut = new TF1("f_width_lower_cut","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_width_lower_cut->SetParameter(0,width_lower_boundary);
+    f_width_lower_cut->Draw("SAME");
+    TF1 *f_width_upper_cut = new TF1("f_width_upper_cut","[0]",i_min+100*j-10,i_min+100*(j+1)+10);
+    f_width_upper_cut->SetParameter(0,width_upper_boundary);
+    f_width_upper_cut->Draw("SAME");
+ 
+     if (j==0)         {c_hists->Print("QCALT_time_calibration_output/fitted_histograms.pdf[");}
+    c_hists->Print("QCALT_time_calibration_output/fitted_histograms.pdf");
+    if (j==19)        {c_hists->Print("QCALT_time_calibration_output/fitted_histograms.pdf]");}
+    if (j==0)         {c_parameters->Print("QCALT_time_calibration_output/fit_parameters.pdf[");}
+    c_parameters->Print("QCALT_time_calibration_output/fit_parameters.pdf");
+    if (j==19)        {c_parameters->Print("QCALT_time_calibration_output/fit_parameters.pdf]");}
+  }  
+}

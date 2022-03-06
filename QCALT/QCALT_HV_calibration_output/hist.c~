@@ -1,0 +1,34 @@
+
+/*#include <stdio.h>
+#include <iostream>
+#include <fstream>
+using namespace std;
+*/
+void hist()
+{
+	FILE *fp;
+	
+
+
+//	char * filename = "myfile02.txt";
+	char * filename = "calib_82867.root.dat";
+	fp = fopen(filename,"r");
+    const int numL = 1920;
+	float ch[numL];
+	float gain[numL];
+    float gain_err[numL];
+
+    TH1D *h_gain = new TH1D ("h_gain","Gains of channels",1920,0,1920);
+    //	int nn = 0;
+	fp = fopen(filename,"r");
+    printf("IN**********\n");
+
+    for(i=0;i<numL;i++)
+	{
+		fscanf(fp,"%f %f %f",&ch[i],&gain[i],&gain_err[i]);
+        h_gain->SetBinContent(ch[i],gain[i]);
+        h_gain->SetBinError(ch[i],gain_err[i]);
+		
+	}
+    h_gain->Draw();
+}
